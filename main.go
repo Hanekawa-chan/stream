@@ -2,11 +2,12 @@ package main
 
 import (
 	"context"
-	grpcPrometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
+	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/grpc-ecosystem/grpc-gateway/runtime"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
-	"github.com/tmc/grpc-websocket-proxy/examples/cmd/wsechoserver/echoserver"
 	"github.com/tmc/grpc-websocket-proxy/wsproxy"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"net"
 	"net/http"
@@ -18,13 +19,15 @@ type Stream struct {
 	proto.UnimplementedStreamServiceServer
 }
 
-func (s *Stream) EchoReq(ctx context.Context, empty *proto.Empty) (*proto.Result, error) {
+func (s *Stream) EchoReq(_ context.Context, empty *proto.Empty) (*proto.Result, error) {
+	log.Log().Msg("get " + empty.Msg)
 	return &proto.Result{Status: true, Msg: "ok"}, nil
 }
 
-func(s *Stream) EchoStr(_ *proto.Empty, client proto.StreamService_EchoStrServer) error {
+func (s *Stream) EchoStr(empty *proto.Empty, client proto.StreamService_EchoStrServer) error {
 	for {
-		time.Sleep(10*time.Second)
+		time.Sleep(10 * time.Second)
+		log.Log().Msg("get " + empty.Msg)
 		err := client.Send(&proto.Result{Status: true, Msg: "sending something"})
 		if err != nil {
 			return err
@@ -33,28 +36,46 @@ func(s *Stream) EchoStr(_ *proto.Empty, client proto.StreamService_EchoStrServer
 }
 
 func main() {
-	server := grpc.NewServer()
-	proto.RegisterStreamServiceServer(server, &Stream{})
-	grpcPrometheus.Register(server)
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	mux := runtime.NewServeMux()
-	opts := []grpc.DialOption{grpc.WithInsecure()}
-	go func() {
-		if err := echoserver.RegisterEchoServiceHandlerFromEndpoint(context.Background(), mux, ":9998", opts); err != nil {
-			log.Fatal().Err(err)
-		}
-		err := http.ListenAndServe(":10000", wsproxy.WebsocketProxy(mux))
-		if err != nil {
-			log.Fatal().Err(err)
-		}
-	}()
-
-	lis, err := net.Listen("tcp", ":9999")
+	lis, err := net.Listen("tcp", ":8842")
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to listen")
+		log.Fatal().Err(err)
 	}
-	log.Log().Msg("public server started")
-	if err := server.Serve(lis); err != nil {
-		log.Fatal().Err(err).Msg("listen server")
+
+	grpcServer := grpc.NewServer()
+	proto.RegisterStreamServiceServer(grpcServer, &Stream{})
+	grpc_prometheus.Register(grpcServer)
+
+	var group errgroup.Group
+
+	group.Go(func() error {
+		return grpcServer.Serve(lis)
+	})
+
+	gwmux := runtime.NewServeMux(runtime.WithMarshalerOption(runtime.MIMEWildcard, &runtime.JSONPb{OrigName: true, EmitDefaults: true}))
+	runtime.SetHTTPBodyMarshaler(gwmux)
+	opts := []grpc.DialOption{
+		grpc.WithInsecure(),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(50000000)),
+	}
+
+	group.Go(func() error {
+		return proto.RegisterStreamServiceHandlerFromEndpoint(ctx, gwmux, ":8842", opts)
+	})
+	mux := http.NewServeMux()
+	mux.Handle("/", wsproxy.WebsocketProxy(gwmux))
+	group.Go(func() error {
+		return http.ListenAndServe(":8843", mux)
+	})
+	group.Go(func() error {
+		return http.ListenAndServe(":8844", promhttp.Handler())
+	})
+	log.Log().Msg("working")
+	err = group.Wait()
+	if err != nil {
+		log.Fatal().Err(err)
 	}
 }
