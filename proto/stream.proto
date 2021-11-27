@@ -1,14 +1,15 @@
 syntax = "proto3";
 package stream;
-option go_package = "/proto";
+option go_package = "proto";
 
-import "proto/google/api/annotations.proto";
+import "proto/annotations.proto";
+import "google/api/http.proto";
 
 service StreamService {
   rpc EchoStr(Empty) returns (stream Result);
   rpc EchoReq(Empty) returns (Result) {
     option (google.api.http) = {
-      post: "/v1/book"
+      post: "/v1/echoreq"
       body: "*"
     };
   }
