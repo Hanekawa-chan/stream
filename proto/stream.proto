@@ -1,0 +1,24 @@
+syntax = "proto3";
+package stream;
+option go_package = "/proto";
+
+import "proto/google/api/annotations.proto";
+
+service StreamService {
+  rpc EchoStr(Empty) returns (stream Result);
+  rpc EchoReq(Empty) returns (Result) {
+    option (google.api.http) = {
+      post: "/v1/book"
+      body: "*"
+    };
+  }
+}
+
+message Empty {
+}
+
+message Result
+{
+  bool status =1;
+  string msg=2;
+}
