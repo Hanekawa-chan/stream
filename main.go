@@ -2,36 +2,50 @@ package main
 
 import (
 	"context"
-	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
-	"github.com/grpc-ecosystem/grpc-gateway/runtime"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"github.com/tmc/grpc-websocket-proxy/wsproxy"
-	"golang.org/x/sync/errgroup"
-	"google.golang.org/grpc"
-	"net"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"net/http"
 	"stream/proto"
-	"time"
 )
 
+var upgrader = websocket.Upgrader{}
+
 type Stream struct {
-	proto.UnimplementedStreamServiceServer
 }
 
-func (s *Stream) EchoReq(_ context.Context, empty *proto.Empty) (*proto.Result, error) {
-	log.Log().Msg("get " + empty.Msg)
-	return &proto.Result{Status: true, Msg: "ok"}, nil
-}
+//func (s Stream) EchoStr(ctx context.Context, message *proto.Message) (*proto.Message, error) {
+//	panic("implement me")
+//}
 
-func (s *Stream) EchoStr(empty *proto.Empty, client proto.StreamService_EchoStrServer) error {
+func echo(w http.ResponseWriter, r *http.Request) {
+	c, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Print("upgrade:", err)
+		return
+	}
+	defer c.Close()
 	for {
-		time.Sleep(10 * time.Second)
-		log.Log().Msg("get " + empty.Msg)
-		err := client.Send(&proto.Result{Status: true, Msg: "sending something"})
+		mt, message, err := c.ReadMessage()
 		if err != nil {
-			return err
+			log.Log().Err(err)
+			break
 		}
+		log.Printf("recv: %s", message)
+		err = c.WriteMessage(mt, message)
+		if err != nil {
+			log.Log().Err(err)
+			break
+		}
+	}
+}
+
+func (s Stream) EchoReq(ctx context.Context, message *proto.Message) (*proto.Message, error) {
+	if message != nil {
+		return message, nil
+	} else {
+		return nil, status.Error(codes.InvalidArgument, "message came empty")
 	}
 }
 
@@ -40,42 +54,19 @@ func main() {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	lis, err := net.Listen("tcp", ":8842")
-	if err != nil {
-		log.Fatal().Err(err)
-	}
+	server := &Stream{}
+	twirpHandler := proto.NewStreamServiceServer(server, nil)
 
-	grpcServer := grpc.NewServer()
-	proto.RegisterStreamServiceServer(grpcServer, &Stream{})
-	grpc_prometheus.Register(grpcServer)
+	http.HandleFunc("/echo", echo)
 
-	var group errgroup.Group
-
-	group.Go(func() error {
-		return grpcServer.Serve(lis)
-	})
-
-	gwmux := runtime.NewServeMux(runtime.WithMarshalerOption(runtime.MIMEWildcard, &runtime.JSONPb{OrigName: true, EmitDefaults: true}))
-	runtime.SetHTTPBodyMarshaler(gwmux)
-	opts := []grpc.DialOption{
-		grpc.WithInsecure(),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(50000000)),
-	}
-
-	group.Go(func() error {
-		return proto.RegisterStreamServiceHandlerFromEndpoint(ctx, gwmux, ":8842", opts)
-	})
-	mux := http.NewServeMux()
-	mux.Handle("/", wsproxy.WebsocketProxy(gwmux))
-	group.Go(func() error {
-		return http.ListenAndServe(":8843", mux)
-	})
-	group.Go(func() error {
-		return http.ListenAndServe(":8844", promhttp.Handler())
-	})
 	log.Log().Msg("working")
-	err = group.Wait()
-	if err != nil {
+
+	go func() {
+		if err := http.ListenAndServe(":8081", twirpHandler); err != nil {
+			log.Fatal().Err(err)
+		}
+	}()
+	if err := http.ListenAndServe(":8082", nil); err != nil {
 		log.Fatal().Err(err)
 	}
 }

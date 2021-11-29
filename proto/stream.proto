@@ -2,29 +2,12 @@ syntax = "proto3";
 package stream;
 option go_package = "/proto";
 
-import "annotations.proto";
 
 service StreamService {
-  rpc EchoStr(Empty) returns (stream Result) {
-    option (google.api.http) = {
-      post: "/stream/echostr"
-      body: "*"
-    };
-  }
-  rpc EchoReq(Empty) returns (Result) {
-    option (google.api.http) = {
-      post: "/stream/echoreq"
-      body: "*"
-    };
-  }
+  //rpc EchoStr(stream Message) returns (stream Message);
+  rpc EchoReq(Message) returns (Message);
 }
 
-message Empty {
+message Message {
   string msg=1;
-}
-
-message Result
-{
-  bool status =1;
-  string msg=2;
 }
